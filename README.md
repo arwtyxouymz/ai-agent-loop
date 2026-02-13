@@ -1,0 +1,573 @@
+# AI Agent Loop
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) を複数並列で自律的に動作させ、Git で協調させるボイラープレート。
+[Anthropic が16並列エージェントで C コンパイラを構築した事例](https://www.anthropic.com/engineering/building-c-compiler) のアーキテクチャを汎用テンプレート化したもの。
+
+## アーキテクチャ概要
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  ホストマシン                                                │
+│                                                             │
+│  orchestrator.sh ──── シグナル監視 → エージェント数を制御      │
+│       │                                                     │
+│  docker compose                                             │
+│       │                                                     │
+│  ┌────┴──────────────────────────────────────────────┐      │
+│  │  Docker                                           │      │
+│  │                                                   │      │
+│  │  ┌──────────┐   ┌─────────────────────────────┐   │      │
+│  │  │ upstream  │   │  upstream-repo (volume)     │   │      │
+│  │  │ (初期化) ├──▶│  ベア Git リポジトリ          │   │      │
+│  │  └──────────┘   │                             │   │      │
+│  │                  │  current_tasks/  ideas/     │   │      │
+│  │                  │  CLAUDE.md  .gitignore      │   │      │
+│  │                  └──────┬──────────────────────┘   │      │
+│  │                         │                          │      │
+│  │            ┌────────────┼────────────┐             │      │
+│  │            │            │            │             │      │
+│  │       ┌────┴───┐  ┌────┴───┐  ┌────┴───┐         │      │
+│  │       │Agent 1 │  │Agent 2 │  │Agent N │  ...     │      │
+│  │       │ clone  │  │ clone  │  │ clone  │ (最大 8) │      │
+│  │       │ loop   │  │ loop   │  │ loop   │          │      │
+│  │       │ push   │  │ push   │  │ push   │          │      │
+│  │       └────────┘  └────────┘  └────────┘          │      │
+│  └───────────────────────────────────────────────────┘      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+システムは3つのプリミティブに依存している：
+
+| プリミティブ | 役割 |
+|------------|------|
+| **Docker コンテナ** | 隔離と並列化 — 各エージェントが独立したコンテナで動作 |
+| **無限 `while true` ループ** | 各エージェントの自律的・継続的な動作 |
+| **Git push/pull（ローカルベアリポ）** | エージェント間の同期とコンフリクト解決 |
+
+## クイックスタート
+
+```bash
+# 1. ボイラープレートをクローン
+git clone <this-repo> my-project
+cd my-project
+
+# 2. 環境変数を設定
+cp .env.example .env
+# .env を編集 — 最低限 ANTHROPIC_API_KEY を設定
+
+# 3. プロジェクト固有の設定をカスタマイズ
+#    CLAUDE.md      — 技術スタック、ビルドコマンド、アーキテクチャ
+#    AGENT_PROMPT.md — [PROJECT-SPECIFIC] セクション
+
+# 4. 起動（エージェント1台で開始）
+docker compose up -d
+
+# 5.（任意）別ターミナルでオートスケーラーを起動
+./orchestrator.sh
+```
+
+## ファイル構成
+
+```
+ai-agent-loop/
+├── docker-compose.yml      # サービス定義: upstream + agent
+├── .env.example            # 環境変数テンプレート
+├── .gitignore
+├── orchestrator.sh         # オートスケーリング（ホスト上で実行）
+├── init-upstream.sh        # ベアリポ初期化スクリプト
+├── AGENT_PROMPT.md         # 毎セッション Claude に渡すプロンプトテンプレート
+├── CLAUDE.md               # ベアリポにシードされるプロジェクト設定
+├── agent/
+│   ├── Dockerfile          # node:20-slim + git + Claude Code CLI
+│   └── entrypoint.sh       # 無限ループ（心臓部）
+└── examples/
+    ├── ideas/              # アイデアファイルのフォーマット例
+    └── current_tasks/      # タスクロックファイルのフォーマット例
+```
+
+## 仕組みの詳解
+
+### エージェントループ
+
+各エージェントコンテナは `agent/entrypoint.sh` で定義された無限ループを実行する：
+
+```
+┌─────────────────────────────────────────┐
+│            エージェント起動              │
+│  1. 一意の Git ID を設定（ホスト名）     │
+│  2. ベアリポからクローン                 │
+│  3. 前回の残留ロックファイルをクリア      │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│          メインループ (∞)               │◀─────────┐
+│                                         │          │
+│  0. ★ シャットダウン/ポーズチェック      │          │
+│  1. git pull --rebase                   │          │
+│  2. AGENT_PROMPT.md を envsubst で展開   │          │
+│  3. claude -p <プロンプト> を実行         │          │
+│     --dangerously-skip-permissions      │          │
+│  4. 変更があれば → push_with_retry      │          │
+│  5. ログローテーション（最新50件保持）    │          │
+│  6. 5秒スリープ（割り込み可能）          │          │
+│                                         │          │
+│  失敗時:                                 │          │
+│    指数バックオフ（最大300秒）            │          │
+└─────────────────────────────────────────┘──────────┘
+```
+
+#### 起動時の stale lock クリア
+
+エージェントが起動すると、`current_tasks/` 内で **自分の AGENT_ID を含むロックファイルだけ** を削除する。
+他のエージェントが保持する有効なロックには一切触れない。
+これにより、クラッシュしたエージェントが残したロックによるデッドロックを防ぎつつ、
+並行して稼働中の他エージェントの作業を妨害しない。
+
+#### エラーリカバリ
+
+`consecutive_failures` カウンタで連続失敗を追跡し、指数バックオフを適用する：
+
+```
+失敗1回目〜4回目: 即座にリトライ（通常の5秒スリープのみ）
+失敗5回目:       60秒待機
+失敗6回目:       120秒待機
+...
+失敗N回目:       min(N * 60, 300) 秒待機
+```
+
+成功すればカウンタはリセットされる。
+
+### タスク協調（楽観的ロック）
+
+エージェント間の協調は Git ベースの楽観的ロックで行われる。
+中央スケジューラも、メッセージキューも、データベースも不要 — ファイルと push だけで完結する。
+
+**タスクの確保:**
+
+```
+Agent A                     ベアリポ                      Agent B
+   │                           │                            │
+   │  current_tasks/           │                            │
+   │  my-task.txt を作成       │                            │
+   │  commit "Lock: my-task"   │                            │
+   │  git push ─────────────▶  │                            │
+   │           (成功) ◀──────  │                            │
+   │                           │  ◀──── git push (REJECTED) │
+   │                           │        (同じタスク)         │
+   │                           │  ────▶ pull して既にロック  │
+   │                           │        済みと判明、         │
+   │                           │        別タスクを選択       │
+   │                           │                            │
+```
+
+**タスクの完了:**
+
+```bash
+# ロック削除 + 実装コミットをアトミックに実行
+git rm current_tasks/my-task.txt
+git add -A
+git commit -m "feat: implement my-task"
+git push origin main
+```
+
+ロックファイルの形式：
+
+```
+Claimed by: agent-abc123
+Started: 2025-01-15T10:30:00Z
+Description: JWT認証ミドルウェアの実装
+```
+
+### アイデアシステム
+
+エージェント（または人間）は `ideas/` にファイルを作成して作業を提案できる：
+
+```
+ideas/
+├── IMPORTANT_implement_auth.txt    ← 人間からの指示（最高優先度）
+├── add_caching_layer.txt           ← エージェントからの提案
+└── refactor_error_handling.txt     ← エージェントからの提案
+```
+
+アイデアファイルの形式：
+
+```
+Priority: high | medium | low
+Impact: <達成される効果>
+Description: <詳細な説明>
+Proposed by: <agent-id or "human">
+```
+
+`IMPORTANT_` プレフィックス付きのファイルは人間からの高優先指示として最初に処理される。
+
+**優先順位:**
+1. `ideas/` 内の `IMPORTANT_*` ファイル
+2. ビルド/テストの修復
+3. 優先度順のアイデア
+4. テストカバレッジの改善
+5. リファクタリング
+
+### マージコンフリクトの解決
+
+複数エージェントが同じブランチに push するため、コンフリクトは不可避。
+システムは2つのレベルで対処する：
+
+**`entrypoint.sh` レベル** — 自動リトライとフォールバック:
+
+```bash
+# まず rebase を試行（履歴がクリーン）
+git pull --rebase origin main
+
+# rebase が失敗したらマージにフォールバック
+git rebase --abort
+git pull --no-rebase origin main
+```
+
+**`push_with_retry()`** — 最大5回リトライ（1秒間隔）:
+
+```
+試行1: push → rejected → pull --rebase → リトライ
+試行2: push → rejected → pull --rebase → リトライ
+...
+試行5: push → rejected → 諦めて次のループへ
+```
+
+**Claude レベル** — `AGENT_PROMPT.md` がエージェントに以下を指示：
+- コンフリクト時は可能な限り両方の変更を保持する
+- 変更が本当に矛盾する場合は upstream（pull 側）を優先する
+- 他のエージェントの作業を暗黙的に捨てない
+
+## オートスケーリング・オーケストレータ
+
+`orchestrator.sh` はホスト上で動作し、4つのシグナルを監視してスケーリングを判断する：
+
+```
+                        ┌──────────────────┐
+                        │  チェックサイクル  │
+                        │  （60秒ごと）      │
+                        └────────┬─────────┘
+                                 │
+                    ┌────────────▼────────────┐
+              No    │  シグナル1: 成熟度       │
+          ┌─────────│  コミット数 >= 閾値?     │
+          │         └────────────┬────────────┘
+          │                     │ Yes
+          │         ┌───────────▼─────────────┐
+          │    No   │  シグナル2: ビルド健全性  │
+          ├─────────│  BUILD_CHECK_CMD 成功?   │
+          │         └───────────┬─────────────┘
+          │                     │ Yes
+          │         ┌───────────▼─────────────┐
+          │    No   │  シグナル3: コンフリクト率│
+          ├─────────│  マージ率 < 40%?         │
+          │         └───────────┬─────────────┘
+          │                     │ Yes
+          │         ┌───────────▼─────────────┐
+          │         │  シグナル4: タスク供給量  │
+          │         │  desired = tasks / ratio │
+          │         └───────────┬─────────────┘
+          │                     │
+          ▼                     ▼
+       ┌──────┐          ┌──────────┐
+       │ HOLD │          │ SCALE UP │
+       │ 保留 │          │（最大+2）│
+       └──────┘          └──────────┘
+```
+
+| シグナル | チェック内容 | HOLD 条件 |
+|---------|-------------|-----------|
+| **成熟度** | リポジトリの総コミット数 | `MATURITY_COMMIT_THRESHOLD`（デフォルト: 10）未満 |
+| **ビルド健全性** | `BUILD_CHECK_CMD` の終了コード | 非ゼロ（ビルド失敗） |
+| **コンフリクト率** | マージコミット / 総コミット（直近1時間） | `CONFLICT_THRESHOLD_HIGH`（デフォルト: 40%）超過 |
+| **タスク供給量** | `ideas/` + `current_tasks/` のファイル数 | `MIN_IDEAS_PER_AGENT` の比率で必要エージェント数を算出 |
+
+オーケストレータは Docker volume からベアリポを一時ディレクトリにクローンし、読み取り専用で検査する。
+
+### オーケストレータのサブコマンド
+
+```bash
+./orchestrator.sh          # オートスケーリングループを開始（デフォルト）
+./orchestrator.sh run      # 同上
+./orchestrator.sh stop     # 全エージェントをグレースフルに停止
+./orchestrator.sh pause    # 全エージェントを一時停止（新タスク取得を停止）
+./orchestrator.sh resume   # 一時停止を解除
+```
+
+オーケストレータ自身が SIGTERM を受信した場合も、まず全エージェントの graceful stop を実行してから終了する。
+
+## サービス構成
+
+### `upstream`（init コンテナ）
+
+`init-upstream.sh` を1回実行して終了する。ベア Git リポジトリを以下の構造で初期化：
+
+- `current_tasks/.keep` — タスクロックファイル用ディレクトリ
+- `ideas/.keep` — アイデア提案用ディレクトリ
+- `CLAUDE.md` — プロジェクト設定（ホストからコピー）
+- `.gitignore`
+
+冪等性あり — リポジトリに既にコミットがある場合はスキップ。
+
+### `agent`（スケーラブルワーカー）
+
+各レプリカの動作：
+- 共有ベアリポからクローン
+- 無限 Claude Code ループを実行
+- コンテナのホスト名に基づく一意の Git ID を取得
+- クラッシュ時は自動再起動（`restart: unless-stopped`）
+- メモリ制限: コンテナあたり 4GB
+
+## 設定リファレンス
+
+### 必須
+
+| 変数 | 説明 |
+|------|------|
+| `ANTHROPIC_API_KEY` | Anthropic API キー |
+
+または：
+
+| 変数 | 説明 |
+|------|------|
+| `CLAUDE_CODE_OAUTH_TOKEN` | OAuth トークン（Claude Pro/Max サブスクリプション） |
+
+### エージェント設定
+
+| 変数 | デフォルト | 説明 |
+|------|-----------|------|
+| `CLAUDE_MODEL` | `claude-opus-4-6` | 使用する Claude モデル |
+| `AGENT_SLEEP` | `5` | ループ間のスリープ秒数 |
+| `MAX_CONSECUTIVE_FAILURES` | `5` | 延長バックオフまでの連続失敗回数 |
+| `MAX_LOGS` | `50` | エージェントあたりの最大ログファイル数 |
+
+### オーケストレータ設定
+
+| 変数 | デフォルト | 説明 |
+|------|-----------|------|
+| `MAX_AGENTS` | `8` | エージェントコンテナの最大数 |
+| `CHECK_INTERVAL` | `60` | スケーリングチェック間隔（秒） |
+| `SCALE_INCREMENT` | `2` | 1サイクルあたりの最大追加数 |
+| `MATURITY_COMMIT_THRESHOLD` | `10` | スケーリング開始に必要な最小コミット数 |
+| `MIN_IDEAS_PER_AGENT` | `2` | タスク対エージェント比率 |
+| `CONFLICT_THRESHOLD_HIGH` | `40` | スケーリングを一時停止するコンフリクト率（%） |
+| `CONFLICT_THRESHOLD_LOW` | `20` | 健全とみなすコンフリクト率（%） |
+
+### プロジェクト固有設定
+
+| 変数 | デフォルト | 説明 |
+|------|-----------|------|
+| `BUILD_CHECK_CMD` | _(空)_ | ビルド健全性チェックコマンド（例: `cargo check`, `npm run build`） |
+| `SRC_GLOB` | _(空)_ | ソースファイルパターン（成熟度検出用） |
+
+## プロジェクトへのカスタマイズ
+
+### 1. `CLAUDE.md` の編集
+
+このファイルはベアリポにシードされ、Claude Code が自動的に読み取る。
+`[PROJECT-SPECIFIC]` セクションを埋める：
+
+```markdown
+## [PROJECT-SPECIFIC] Tech Stack
+- Language: Rust
+- Framework: なし（スタンドアロンバイナリ）
+- Build tool: Cargo
+
+## [PROJECT-SPECIFIC] Build & Test Commands
+\```bash
+cargo build
+cargo test
+cargo clippy
+\```
+
+## [PROJECT-SPECIFIC] Architecture
+コンパイラはパイプライン構造:
+  lexer -> parser -> type checker -> codegen
+```
+
+### 2. `AGENT_PROMPT.md` の編集
+
+末尾の `[PROJECT-SPECIFIC]` セクションを埋める。
+このプロンプトはセッションごとに `envsubst` でレンダリングされ、
+`${AGENT_ID}` と `${AGENT_MODEL}` が実際の値に置換される。
+
+### 3. `.env` で `BUILD_CHECK_CMD` を設定
+
+```bash
+# Rust
+BUILD_CHECK_CMD="cargo check"
+
+# TypeScript
+BUILD_CHECK_CMD="npm run build"
+
+# Python
+BUILD_CHECK_CMD="python -m pytest --quick"
+
+# Go
+BUILD_CHECK_CMD="go build ./..."
+```
+
+### 4. Dockerfile の拡張（必要に応じて）
+
+プロジェクト固有のツールチェーンが必要な場合、`agent/Dockerfile` を拡張する：
+
+```dockerfile
+FROM node:20-slim
+
+# ... 既存のセットアップ ...
+
+# 例: Rust ツールチェーンを追加
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+```
+
+## 運用ガイド
+
+### 手動スケーリング
+
+```bash
+# 4エージェントにスケール（既存コンテナを再作成しない）
+docker compose up -d --scale agent=4 --no-recreate
+
+# 1エージェントに戻す
+docker compose up -d --scale agent=1 --no-recreate
+```
+
+### モニタリング
+
+```bash
+# 稼働中のエージェントを確認
+docker compose ps
+
+# 全エージェントのログをフォロー
+docker compose logs -f agent
+
+# 特定エージェントのログをフォロー
+docker compose logs -f agent-1
+
+# オーケストレータの判断ログを確認
+tail -f orchestrator.log
+```
+
+### エージェントへのタスク投入
+
+アイデアファイルを作成してエージェントの作業を指示する：
+
+```bash
+# Docker volume 経由で一時クローンを作成
+docker run --rm \
+  -v ai-agent-loop_upstream-repo:/upstream:ro \
+  -v $(pwd)/tmp-checkout:/checkout \
+  alpine/git clone /upstream /checkout
+
+cd tmp-checkout
+
+# 高優先度の指示を作成
+cat > ideas/IMPORTANT_implement_auth.txt << 'EOF'
+Priority: high
+Impact: コア機能 — 他の全API作業をブロック
+Description:
+  JWT ベースの認証ミドルウェアを実装する。
+  - POST /auth/login で署名済み JWT を返す
+  - ミドルウェアで保護ルートの JWT を検証
+  - 認証エンドポイントにレート制限を追加
+Proposed by: human
+EOF
+
+git add ideas/IMPORTANT_implement_auth.txt
+git commit -m "Add idea: implement authentication"
+git push origin main
+```
+
+### エージェントの停止・一時停止・再開
+
+推奨は `orchestrator.sh` のサブコマンドを使う方法。
+エージェントは SIGTERM を受信すると、実行中の `claude -p` セッションが完了するのを待ち、
+未 push の変更を push し、自分のロックファイルを解放してから終了する（最大 5 分間の猶予）。
+
+```bash
+# ★ 推奨: 全エージェントをグレースフルに停止
+#   → 作業完了 → push → ロック解放 → 終了
+./orchestrator.sh stop
+
+# 一時停止（現在の作業は完了するが、次のタスクを取らない）
+./orchestrator.sh pause
+
+# 一時停止を解除
+./orchestrator.sh resume
+```
+
+`docker compose down` も利用可能。SIGTERM ハンドリングが組み込まれているため、
+内部的には同じ graceful shutdown が走る。
+ただし `orchestrator.sh stop` は明示的に 300 秒のタイムアウトを指定する点が異なる。
+
+```bash
+# docker compose 経由で停止（ボリュームデータは保持）
+docker compose down
+
+# 停止してボリュームも削除（リポジトリデータが全て消える）
+docker compose down -v
+```
+
+### 共有リポジトリの検査
+
+```bash
+# Docker volume からクローンして検査
+docker run --rm \
+  -v ai-agent-loop_upstream-repo:/upstream:ro \
+  -v $(pwd)/inspect:/inspect \
+  alpine/git clone /upstream /inspect
+
+# コミット履歴を確認
+cd inspect && git log --oneline --graph
+```
+
+## エラーリカバリ一覧
+
+| シナリオ | 動作 |
+|---------|------|
+| Claude CLI クラッシュ | `consecutive_failures` カウンタ増加、指数バックオフ（最大300秒） |
+| push 拒否（コンフリクト） | `push_with_retry()`: pull --rebase → 最大5回リトライ |
+| rebase 失敗 | `--no-rebase` マージにフォールバック |
+| コンテナクラッシュ | Docker の `restart: unless-stopped` で自動再起動 |
+| 残留タスクロック | エージェント起動時に自身のロックのみクリア |
+| 認証トークン期限切れ | Claude CLI が非ゼロで終了、バックオフ後に次ループでリトライ |
+| SIGTERM 受信 | 現在のイテレーション完了 → WIP push → ロック解放 → 正常終了 |
+| 一時停止（`.pause`） | 新タスクを取得せずスリープし続ける。`.pause` 削除で再開 |
+
+## 設計判断の根拠
+
+このボイラープレートは意図的にシンプルに保っている。
+オーケストレーション全体がシェルスクリプトで完結し、Docker 以外の外部依存がない。
+
+| 判断 | 選択 | 根拠 |
+|------|------|------|
+| ベースイメージ | `node:20-slim` | Claude Code CLI は npm パッケージ。slim で約400MB削減 |
+| ベアリポ同期 | `git pull --rebase` + `--no-rebase` フォールバック | rebase で履歴がクリーン、複雑なコンフリクト時のフォールバック確保 |
+| スケール増分 | 1サイクルあたり最大+2 | 段階的スケーリングがコンフリクト率の急増を防ぐ（C コンパイラプロジェクトからの知見） |
+| テンプレート展開 | `envsubst` + 明示的変数リスト | プロンプト内の `$()` の誤展開を防止 |
+| オーケストレータ位置 | ホスト上（コンテナ外） | `docker compose --scale` へのアクセスが必要 |
+| 中央スケジューラなし | Git ベースの楽観的ロックのみ | C コンパイラプロジェクトで実証済みのアプローチ。インフラオーバーヘッドゼロ |
+| `stop_grace_period` | 5 分 | claude セッションは通常数分。超過時は Docker が SIGKILL（許容範囲のトレードオフ） |
+| `sleep & wait` パターン | `sleep N & wait $!` | SIGTERM 受信時に sleep を即座に中断し、次ループ先頭の終了チェックに到達させる |
+| ロック削除範囲 | 自 AGENT_ID のみ | 他エージェントの有効なロックを誤削除しない。並列稼働時の安全性を優先 |
+
+## 参考資料
+
+このプロジェクトは [Anthropic が16並列 Claude Code エージェントで C コンパイラを構築した方法](https://www.anthropic.com/engineering/building-c-compiler) の詳細分析に基づいている。分析ドキュメントは [`docs/`](./docs/README.md) に体系的にまとめている：
+
+| カテゴリ | ドキュメント | 内容 |
+|---|---|---|
+| アーキテクチャ | [`docs/architecture.md`](./docs/architecture.md) | コア・コンポーネント、構成図、ワークフロー、楽観的ロック |
+| 実証分析 | [`docs/analysis/`](./docs/analysis/) | コミット粒度、並列化タイムライン、スケーリング証拠、統計 |
+| 設計アプローチ | [`docs/design/`](./docs/design/) | 自動スケーリング設計案、docker-compose、ベアリポジトリ |
+
+分析からこのボイラープレートに反映された主要な知見：
+- **Git による楽観的ロック**はタスク協調に十分 — データベースもメッセージキューも不要
+- **段階的スケーリング**（一斉投入ではなく）がコンフリクト率を管理可能に保つ
+- **起動時の自己ロッククリア**がクラッシュしたエージェントによるデッドロックを防ぐ（他エージェントのロックは保持）
+- **エージェントプロンプト**が最も重要なコンポーネント — エージェントの協調品質を決定する
+
+## ライセンス
+
+MIT

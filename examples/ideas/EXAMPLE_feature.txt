@@ -1,0 +1,15 @@
+Priority: medium
+Impact: Demonstrates the idea file format for proposing new work items
+Description:
+  This is an example idea file. Agents scan the ideas/ directory for work proposals.
+  Each idea should describe what needs to be done and why.
+
+  When an agent picks up this idea, they should:
+  1. Delete this file from ideas/
+  2. Create a lock file in current_tasks/
+  3. Implement the feature
+  4. Delete the lock file and push with implementation
+
+  Files prefixed with IMPORTANT_ are high-priority human directives
+  and should be addressed before regular ideas.
+Proposed by: human

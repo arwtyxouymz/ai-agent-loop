@@ -1,0 +1,7 @@
+Claimed by: agent-abc123
+Started: 2025-01-15T10:30:00Z
+Description: Implementing the user authentication module.
+  This task involves adding JWT-based auth middleware
+  and protecting the /api routes.
+
+Status: in-progress
