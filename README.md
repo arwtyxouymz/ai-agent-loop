@@ -1,28 +1,30 @@
 # AI Agent Loop
 
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) を複数並列で自律的に動作させ、Git で協調させるボイラープレート。
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) を複数並列で自律的に動作させ、Git で協調させるドロップインオーケストレーター。
 [Anthropic が16並列エージェントで C コンパイラを構築した事例](https://www.anthropic.com/engineering/building-c-compiler) のアーキテクチャを汎用テンプレート化したもの。
+
+**ホストリポジトリが Single Source of Truth** — `.ai-agent-loop/` を既存プロジェクトにコピーするだけで、
+エージェントがホストのコードベース上で作業を開始し、結果を `sync-back.sh` でホストに取り込める。
 
 ## アーキテクチャ概要
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  ホストマシン                                                │
+│  ホストマシン（ユーザーのプロジェクトリポジトリ）              │
 │                                                             │
-│  orchestrator.sh ──── シグナル監視 → エージェント数を制御      │
+│  .ai-agent-loop/orchestrator.sh                             │
+│       │         シグナル監視 → エージェント数を制御            │
 │       │                                                     │
-│  docker compose                                             │
+│  docker compose -f .ai-agent-loop/docker-compose.yml        │
 │       │                                                     │
 │  ┌────┴──────────────────────────────────────────────┐      │
 │  │  Docker                                           │      │
 │  │                                                   │      │
 │  │  ┌──────────┐   ┌─────────────────────────────┐   │      │
 │  │  │ upstream  │   │  upstream-repo (volume)     │   │      │
-│  │  │ (初期化) ├──▶│  ベア Git リポジトリ          │   │      │
-│  │  └──────────┘   │                             │   │      │
-│  │                  │  current_tasks/  ideas/     │   │      │
-│  │                  │  CLAUDE.md  .gitignore      │   │      │
-│  │                  └──────┬──────────────────────┘   │      │
+│  │  │ git clone ├──▶│  ベア Git リポジトリ          │   │      │
+│  │  │ --bare   │   │  (ホストリポからクローン)     │   │      │
+│  │  └──────────┘   └──────┬──────────────────────┘   │      │
 │  │                         │                          │      │
 │  │            ┌────────────┼────────────┐             │      │
 │  │            │            │            │             │      │
@@ -33,6 +35,8 @@
 │  │       │ push   │  │ push   │  │ push   │          │      │
 │  │       └────────┘  └────────┘  └────────┘          │      │
 │  └───────────────────────────────────────────────────┘      │
+│                                                             │
+│  .ai-agent-loop/sync-back.sh ← エージェントの成果を取り込み   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,50 +50,97 @@
 
 ## クイックスタート
 
+### A. 既存プロジェクトへの導入
+
 ```bash
-# 1. ボイラープレートをクローン
-git clone <this-repo> my-project
+# 1. .ai-agent-loop/ をプロジェクトにコピー
+cp -r path/to/ai-agent-loop/.ai-agent-loop/ my-project/.ai-agent-loop/
 cd my-project
 
 # 2. 環境変数を設定
-cp .env.example .env
-# .env を編集 — 最低限 ANTHROPIC_API_KEY を設定
+cp .ai-agent-loop/.env.example .ai-agent-loop/.env
+# .ai-agent-loop/.env を編集 — 最低限 ANTHROPIC_API_KEY を設定
 
 # 3. プロジェクト固有の設定をカスタマイズ
-#    CLAUDE.md      — 技術スタック、ビルドコマンド、アーキテクチャ
-#    AGENT_PROMPT.md — [PROJECT-SPECIFIC] セクション
+#    CLAUDE.md                       — 技術スタック、ビルドコマンド、アーキテクチャ
+#    .ai-agent-loop/AGENT_PROMPT.md  — [PROJECT-SPECIFIC] セクション
 
-# 4. 起動（エージェント1台で開始）
-docker compose up -d
+# 4. 起動（エージェント1台で開始、ホストリポを自動クローン）
+docker compose -f .ai-agent-loop/docker-compose.yml up -d
 
 # 5.（任意）別ターミナルでオートスケーラーを起動
-./orchestrator.sh
+.ai-agent-loop/orchestrator.sh
+
+# 6. エージェントの成果を確認・取り込み
+.ai-agent-loop/sync-back.sh              # ログのみ（デフォルト）
+.ai-agent-loop/sync-back.sh --merge      # マージ
+```
+
+### B. このリポ自体で試す（デモ）
+
+```bash
+# 1. クローン
+git clone https://github.com/yourname/ai-agent-loop.git
+cd ai-agent-loop
+
+# 2. 環境変数を設定
+cp .ai-agent-loop/.env.example .ai-agent-loop/.env
+# .ai-agent-loop/.env を編集 — 最低限 ANTHROPIC_API_KEY を設定
+
+# 3. エージェントに最初の仕事を与える
+mkdir -p ideas
+cat > ideas/IMPORTANT_hello_world.txt << 'EOF'
+Priority: high
+Impact: 動作確認
+Description: hello world を出力する Python スクリプト hello.py を作成せよ。
+Proposed by: human
+EOF
+git add ideas/ && git commit -m "chore: add first task for agents"
+
+# 4. 起動
+docker compose -f .ai-agent-loop/docker-compose.yml up -d
+
+# 5. エージェントのログをフォロー（作業の様子を観察）
+docker compose -f .ai-agent-loop/docker-compose.yml logs -f agent
+
+# 6. 成果を確認・取り込み
+.ai-agent-loop/sync-back.sh              # 何をしたか確認
+.ai-agent-loop/sync-back.sh --merge      # ホストにマージ
+
+# 7. 停止
+.ai-agent-loop/orchestrator.sh stop
+# または: docker compose -f .ai-agent-loop/docker-compose.yml down
 ```
 
 ## ファイル構成
 
 ```
-ai-agent-loop/
-├── docker-compose.yml      # サービス定義: upstream + agent
-├── .env.example            # 環境変数テンプレート
-├── .gitignore
-├── orchestrator.sh         # オートスケーリング（ホスト上で実行）
-├── init-upstream.sh        # ベアリポ初期化スクリプト
-├── AGENT_PROMPT.md         # 毎セッション Claude に渡すプロンプトテンプレート
-├── CLAUDE.md               # ベアリポにシードされるプロジェクト設定
-├── agent/
-│   ├── Dockerfile          # node:20-slim + git + Claude Code CLI
-│   └── entrypoint.sh       # 無限ループ（心臓部）
-└── examples/
-    ├── ideas/              # アイデアファイルのフォーマット例
-    └── current_tasks/      # タスクロックファイルのフォーマット例
+my-project/                           # ユーザーの既存 Git リポジトリ
+├── .git/
+├── CLAUDE.md                         # プロジェクト設定（ルートに配置）
+├── src/                              # 既存のプロジェクトコード
+├── current_tasks/                    # エージェントが必要に応じて作成
+├── ideas/                            # エージェントが必要に応じて作成
+└── .ai-agent-loop/                   # オーケストレーション（ドロップイン）
+    ├── docker-compose.yml            # サービス定義: upstream + agent
+    ├── orchestrator.sh               # オートスケーリング（ホスト上で実行）
+    ├── init-upstream.sh              # ホストリポからベアリポをクローン
+    ├── sync-back.sh                  # エージェント成果をホストに取り込み
+    ├── AGENT_PROMPT.md               # 毎セッション Claude に渡すプロンプト
+    ├── .env.example                  # 環境変数テンプレート
+    ├── .gitignore                    # .env, orchestrator.log を除外
+    ├── agent/
+    │   ├── Dockerfile                # node:20-slim + git + Claude Code CLI
+    │   └── entrypoint.sh             # 無限ループ（心臓部）
+    ├── docs/                         # 参考ドキュメント
+    └── examples/                     # タスク/アイデアファイルの例
 ```
 
 ## 仕組みの詳解
 
 ### エージェントループ
 
-各エージェントコンテナは `agent/entrypoint.sh` で定義された無限ループを実行する：
+各エージェントコンテナは `.ai-agent-loop/agent/entrypoint.sh` で定義された無限ループを実行する：
 
 ```
 ┌─────────────────────────────────────────┐
@@ -287,11 +338,11 @@ git pull --no-rebase origin main
 ### オーケストレータのサブコマンド
 
 ```bash
-./orchestrator.sh          # オートスケーリングループを開始（デフォルト）
-./orchestrator.sh run      # 同上
-./orchestrator.sh stop     # 全エージェントをグレースフルに停止
-./orchestrator.sh pause    # 全エージェントを一時停止（新タスク取得を停止）
-./orchestrator.sh resume   # 一時停止を解除
+.ai-agent-loop/orchestrator.sh          # オートスケーリングループを開始（デフォルト）
+.ai-agent-loop/orchestrator.sh run      # 同上
+.ai-agent-loop/orchestrator.sh stop     # 全エージェントをグレースフルに停止
+.ai-agent-loop/orchestrator.sh pause    # 全エージェントを一時停止（新タスク取得を停止）
+.ai-agent-loop/orchestrator.sh resume   # 一時停止を解除
 ```
 
 オーケストレータ自身が SIGTERM を受信した場合も、まず全エージェントの graceful stop を実行してから終了する。
@@ -300,14 +351,11 @@ git pull --no-rebase origin main
 
 ### `upstream`（init コンテナ）
 
-`init-upstream.sh` を1回実行して終了する。ベア Git リポジトリを以下の構造で初期化：
+`init-upstream.sh` を1回実行して終了する。**ホストリポジトリを `git clone --bare` でベアリポにクローン**し、
+`current_tasks/` と `ideas/` ディレクトリが存在しなければ追加する。
 
-- `current_tasks/.keep` — タスクロックファイル用ディレクトリ
-- `ideas/.keep` — アイデア提案用ディレクトリ
-- `CLAUDE.md` — プロジェクト設定（ホストからコピー）
-- `.gitignore`
-
-冪等性あり — リポジトリに既にコミットがある場合はスキップ。
+**初回起動時:** ホストリポ → ベアリポへの bare clone
+**再起動時（レジューム）:** ホストの最新 HEAD をベアリポに force push（未マージのエージェントコミットがあれば警告）
 
 ### `agent`（スケーラブルワーカー）
 
@@ -385,7 +433,7 @@ cargo clippy
   lexer -> parser -> type checker -> codegen
 ```
 
-### 2. `AGENT_PROMPT.md` の編集
+### 2. `.ai-agent-loop/AGENT_PROMPT.md` の編集
 
 末尾の `[PROJECT-SPECIFIC]` セクションを埋める。
 このプロンプトはセッションごとに `envsubst` でレンダリングされ、
@@ -409,7 +457,7 @@ BUILD_CHECK_CMD="go build ./..."
 
 ### 4. Dockerfile の拡張（必要に応じて）
 
-プロジェクト固有のツールチェーンが必要な場合、`agent/Dockerfile` を拡張する：
+プロジェクト固有のツールチェーンが必要な場合、`.ai-agent-loop/agent/Dockerfile` を拡張する：
 
 ```dockerfile
 FROM node:20-slim
@@ -427,42 +475,32 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 ```bash
 # 4エージェントにスケール（既存コンテナを再作成しない）
-docker compose up -d --scale agent=4 --no-recreate
+docker compose -f .ai-agent-loop/docker-compose.yml up -d --scale agent=4 --no-recreate
 
 # 1エージェントに戻す
-docker compose up -d --scale agent=1 --no-recreate
+docker compose -f .ai-agent-loop/docker-compose.yml up -d --scale agent=1 --no-recreate
 ```
 
 ### モニタリング
 
 ```bash
 # 稼働中のエージェントを確認
-docker compose ps
+docker compose -f .ai-agent-loop/docker-compose.yml ps
 
 # 全エージェントのログをフォロー
-docker compose logs -f agent
-
-# 特定エージェントのログをフォロー
-docker compose logs -f agent-1
+docker compose -f .ai-agent-loop/docker-compose.yml logs -f agent
 
 # オーケストレータの判断ログを確認
-tail -f orchestrator.log
+tail -f .ai-agent-loop/orchestrator.log
 ```
 
 ### エージェントへのタスク投入
 
-アイデアファイルを作成してエージェントの作業を指示する：
+ホストリポに直接アイデアファイルを作成してエージェントの作業を指示する：
 
 ```bash
-# Docker volume 経由で一時クローンを作成
-docker run --rm \
-  -v ai-agent-loop_upstream-repo:/upstream:ro \
-  -v $(pwd)/tmp-checkout:/checkout \
-  alpine/git clone /upstream /checkout
-
-cd tmp-checkout
-
 # 高優先度の指示を作成
+mkdir -p ideas
 cat > ideas/IMPORTANT_implement_auth.txt << 'EOF'
 Priority: high
 Impact: コア機能 — 他の全API作業をブロック
@@ -476,7 +514,20 @@ EOF
 
 git add ideas/IMPORTANT_implement_auth.txt
 git commit -m "Add idea: implement authentication"
-git push origin main
+# 次回のエージェント起動時（またはレジューム時）に反映される
+```
+
+### エージェント成果の取り込み
+
+```bash
+# エージェントのコミットを確認（読み取り専用）
+.ai-agent-loop/sync-back.sh
+
+# マージで取り込み
+.ai-agent-loop/sync-back.sh --merge
+
+# リベースで取り込み（クリーンな履歴）
+.ai-agent-loop/sync-back.sh --rebase
 ```
 
 ### エージェントの停止・一時停止・再開
@@ -488,13 +539,13 @@ git push origin main
 ```bash
 # ★ 推奨: 全エージェントをグレースフルに停止
 #   → 作業完了 → push → ロック解放 → 終了
-./orchestrator.sh stop
+.ai-agent-loop/orchestrator.sh stop
 
 # 一時停止（現在の作業は完了するが、次のタスクを取らない）
-./orchestrator.sh pause
+.ai-agent-loop/orchestrator.sh pause
 
 # 一時停止を解除
-./orchestrator.sh resume
+.ai-agent-loop/orchestrator.sh resume
 ```
 
 `docker compose down` も利用可能。SIGTERM ハンドリングが組み込まれているため、
@@ -503,23 +554,24 @@ git push origin main
 
 ```bash
 # docker compose 経由で停止（ボリュームデータは保持）
-docker compose down
+docker compose -f .ai-agent-loop/docker-compose.yml down
 
 # 停止してボリュームも削除（リポジトリデータが全て消える）
-docker compose down -v
+docker compose -f .ai-agent-loop/docker-compose.yml down -v
 ```
 
-### 共有リポジトリの検査
+### レジュームフロー
 
-```bash
-# Docker volume からクローンして検査
-docker run --rm \
-  -v ai-agent-loop_upstream-repo:/upstream:ro \
-  -v $(pwd)/inspect:/inspect \
-  alpine/git clone /upstream /inspect
-
-# コミット履歴を確認
-cd inspect && git log --oneline --graph
+```
+セッション1: orchestrator.sh run → init がホストリポをクローン → エージェント作業 → orchestrator.sh stop
+            ↓
+同期:       sync-back.sh              → エージェントの成果を確認
+            sync-back.sh --merge      → ホストにマージ
+            ↓
+手動作業:   ユーザーがレビュー、編集、コミット
+            ↓
+セッション2: orchestrator.sh run → init がホスト最新状態をベアリポに反映
+            → エージェントが pull → ホストの最新状態から継続
 ```
 
 ## エラーリカバリ一覧
@@ -554,13 +606,13 @@ cd inspect && git log --oneline --graph
 
 ## 参考資料
 
-このプロジェクトは [Anthropic が16並列 Claude Code エージェントで C コンパイラを構築した方法](https://www.anthropic.com/engineering/building-c-compiler) の詳細分析に基づいている。分析ドキュメントは [`docs/`](./docs/README.md) に体系的にまとめている：
+このプロジェクトは [Anthropic が16並列 Claude Code エージェントで C コンパイラを構築した方法](https://www.anthropic.com/engineering/building-c-compiler) の詳細分析に基づいている。分析ドキュメントは [`.ai-agent-loop/docs/`](./.ai-agent-loop/docs/README.md) に体系的にまとめている：
 
 | カテゴリ | ドキュメント | 内容 |
 |---|---|---|
-| アーキテクチャ | [`docs/architecture.md`](./docs/architecture.md) | コア・コンポーネント、構成図、ワークフロー、楽観的ロック |
-| 実証分析 | [`docs/analysis/`](./docs/analysis/) | コミット粒度、並列化タイムライン、スケーリング証拠、統計 |
-| 設計アプローチ | [`docs/design/`](./docs/design/) | 自動スケーリング設計案、docker-compose、ベアリポジトリ |
+| アーキテクチャ | [`.ai-agent-loop/docs/architecture.md`](./.ai-agent-loop/docs/architecture.md) | コア・コンポーネント、構成図、ワークフロー、楽観的ロック |
+| 実証分析 | [`.ai-agent-loop/docs/analysis/`](./.ai-agent-loop/docs/analysis/) | コミット粒度、並列化タイムライン、スケーリング証拠、統計 |
+| 設計アプローチ | [`.ai-agent-loop/docs/design/`](./.ai-agent-loop/docs/design/) | 自動スケーリング設計案、docker-compose、ベアリポジトリ |
 
 分析からこのボイラープレートに反映された主要な知見：
 - **Git による楽観的ロック**はタスク協調に十分 — データベースもメッセージキューも不要

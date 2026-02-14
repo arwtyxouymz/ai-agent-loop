@@ -5,7 +5,9 @@ services:
     volumes:
       - upstream-repo:/upstream
       - ./init-upstream.sh:/init-upstream.sh:ro
-      - ./CLAUDE.md:/config/CLAUDE.md:ro
+      - ${HOST_PROJECT_DIR:-.}:/host-repo:ro
+    environment:
+      - DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}
     entrypoint: ["/bin/sh", "/init-upstream.sh"]
 
   # ---- Claude Code agent (scalable) ----
@@ -13,6 +15,8 @@ services:
     build:
       context: ./agent
     env_file: .env
+    environment:
+      - DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}
     volumes:
       - upstream-repo:/upstream
       - ./AGENT_PROMPT.md:/config/AGENT_PROMPT.md:ro

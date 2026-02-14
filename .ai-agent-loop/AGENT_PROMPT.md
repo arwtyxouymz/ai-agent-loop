@@ -92,3 +92,4 @@ When you encounter merge conflicts:
 - **Never rewrite published history.** No `--amend` on pushed commits.
 - **Keep sessions focused.** Do one task per session, do it well.
 - **Leave the codebase better than you found it.**
+- **Never modify `.ai-agent-loop/`** — This directory contains orchestration infrastructure. Do not edit or delete files in it.

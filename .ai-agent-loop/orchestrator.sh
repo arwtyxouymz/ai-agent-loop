@@ -5,14 +5,19 @@
 # Runs on the host machine. Monitors the shared bare repo and scales agent
 # containers based on 4 signals: maturity, build health, conflict rate, task supply.
 #
-# Usage: ./orchestrator.sh {run|stop|pause|resume}
+# Usage: .ai-agent-loop/orchestrator.sh {run|stop|pause|resume}
 # ==============================================================================
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
-# Load configuration from .env
+# Path setup
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# Load configuration from .env
+# ---------------------------------------------------------------------------
 if [ -f "${SCRIPT_DIR}/.env" ]; then
     set -a
     # shellcheck disable=SC1091
@@ -30,6 +35,23 @@ MIN_IDEAS_PER_AGENT="${MIN_IDEAS_PER_AGENT:-2}"
 BUILD_CHECK_CMD="${BUILD_CHECK_CMD:-}"
 SRC_GLOB="${SRC_GLOB:-}"
 LOG_FILE="${SCRIPT_DIR}/orchestrator.log"
+
+# Export host project dir for docker-compose.yml
+export HOST_PROJECT_DIR="${HOST_PROJECT_DIR:-${PROJECT_ROOT}}"
+
+# Detect default branch from host repo
+if [ -z "${DEFAULT_BRANCH:-}" ]; then
+    DEFAULT_BRANCH=$(git -C "${PROJECT_ROOT}" symbolic-ref --short HEAD 2>/dev/null || echo "main")
+fi
+export DEFAULT_BRANCH
+
+# Dynamic compose project name from project directory name
+if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
+    COMPOSE_PROJECT_NAME="$(basename "${PROJECT_ROOT}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')-agents"
+fi
+export COMPOSE_PROJECT_NAME
+
+VOLUME_NAME="${COMPOSE_PROJECT_NAME}_upstream-repo"
 
 # ---------------------------------------------------------------------------
 # Utility: cross-platform date (macOS / Linux)
@@ -53,7 +75,6 @@ log() {
 # Inspector: clone/pull the bare repo into a temp directory for analysis
 # ---------------------------------------------------------------------------
 INSPECT_DIR=""
-VOLUME_NAME="ai-agent-loop_upstream-repo"
 
 setup_inspector() {
     INSPECT_DIR=$(mktemp -d)
@@ -86,7 +107,7 @@ refresh_inspector() {
         -v "${VOLUME_NAME}:/upstream:ro" \
         -v "${INSPECT_DIR}:/inspect" \
         alpine/git:latest \
-        -C /inspect/repo pull --rebase origin main 2>/dev/null || true
+        -C /inspect/repo pull --rebase origin "${DEFAULT_BRANCH}" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -265,7 +286,7 @@ main() {
     esac
 
     log "========================================="
-    log "Orchestrator starting (max=${MAX_AGENTS}, interval=${CHECK_INTERVAL}s)"
+    log "Orchestrator starting (project=$(basename "${PROJECT_ROOT}"), max=${MAX_AGENTS}, interval=${CHECK_INTERVAL}s)"
     log "========================================="
 
     setup_inspector

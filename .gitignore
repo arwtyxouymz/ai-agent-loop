@@ -1,11 +1,7 @@
-# Environment (contains secrets)
-.env
-
-# Orchestrator logs
-orchestrator.log
-
-# Docker Compose overrides
-docker-compose.override.yml
+# AI Agent Loop orchestration secrets and logs
+.ai-agent-loop/.env
+.ai-agent-loop/orchestrator.log
+.ai-agent-loop/docker-compose.override.yml
 
 # OS files
 .DS_Store

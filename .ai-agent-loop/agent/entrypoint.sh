@@ -14,6 +14,7 @@ AGENT_SLEEP="${AGENT_SLEEP:-5}"
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-5}"
 MAX_LOGS="${MAX_LOGS:-50}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-/upstream}"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 REPO_DIR="/workspace/repo"
 LOG_DIR="/workspace/logs"
 
@@ -60,17 +61,17 @@ push_with_retry() {
     local attempt=0
 
     while [ $attempt -lt $max_retries ]; do
-        if git push origin main 2>&1; then
+        if git push origin "${DEFAULT_BRANCH}" 2>&1; then
             return 0
         fi
         attempt=$((attempt + 1))
         echo "[${AGENT_ID}] Push failed (attempt ${attempt}/${max_retries}), pulling and retrying..."
 
         # Try rebase first, fall back to merge
-        if ! git pull --rebase origin main 2>&1; then
+        if ! git pull --rebase origin "${DEFAULT_BRANCH}" 2>&1; then
             echo "[${AGENT_ID}] Rebase failed, trying merge..."
             git rebase --abort 2>/dev/null || true
-            git pull --no-rebase origin main 2>&1 || true
+            git pull --no-rebase origin "${DEFAULT_BRANCH}" 2>&1 || true
         fi
         sleep 1
     done
@@ -154,10 +155,10 @@ while true; do
 
     # Pull latest changes
     echo "[${AGENT_ID}] Pulling latest..." | tee -a "${log_file}"
-    if ! git pull --rebase origin main 2>&1 | tee -a "${log_file}"; then
+    if ! git pull --rebase origin "${DEFAULT_BRANCH}" 2>&1 | tee -a "${log_file}"; then
         echo "[${AGENT_ID}] Rebase pull failed, trying merge..." | tee -a "${log_file}"
         git rebase --abort 2>/dev/null || true
-        git pull --no-rebase origin main 2>&1 | tee -a "${log_file}" || true
+        git pull --no-rebase origin "${DEFAULT_BRANCH}" 2>&1 | tee -a "${log_file}" || true
     fi
 
     # Render the prompt template
