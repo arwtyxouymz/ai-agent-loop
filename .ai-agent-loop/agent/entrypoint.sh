@@ -35,6 +35,13 @@ handle_sigterm() {
 }
 trap handle_sigterm SIGTERM SIGINT
 
+# ---------------------------------------------------------------------------
+# Onboarding skip for headless/container environments
+# ---------------------------------------------------------------------------
+if [ ! -f "${HOME}/.claude.json" ]; then
+    echo '{"hasCompletedOnboarding": true}' > "${HOME}/.claude.json"
+fi
+
 echo "[${AGENT_ID}] Agent starting (model=${AGENT_MODEL})"
 
 # ---------------------------------------------------------------------------

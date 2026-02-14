@@ -413,17 +413,32 @@ git pull --no-rebase origin main
 
 ## 設定リファレンス
 
-### 必須
+### 認証（いずれか一つ）
 
 | 変数 | 説明 |
 |------|------|
-| `ANTHROPIC_API_KEY` | Anthropic API キー |
+| `ANTHROPIC_API_KEY` | Anthropic API キー（従量課金） |
+| `CLAUDE_CODE_OAUTH_TOKEN` | OAuth トークン（Claude Pro/Max 定額サブスクリプション） |
 
-または：
+**API キー方式:**
+[Anthropic Console](https://console.anthropic.com/) でキーを発行し、`.env` に設定するだけ。
 
-| 変数 | 説明 |
-|------|------|
-| `CLAUDE_CODE_OAUTH_TOKEN` | OAuth トークン（Claude Pro/Max サブスクリプション） |
+**OAuth トークン方式:**
+
+```bash
+# 1. ローカルで Claude Code にログイン（ブラウザが開く）
+claude login
+
+# 2. トークンを取得
+claude setup-token
+# 出力されたトークンをコピー
+
+# 3. .env に設定
+echo 'CLAUDE_CODE_OAUTH_TOKEN=<取得したトークン>' >> .ai-agent-loop/.env
+```
+
+> **注意:** OAuth トークンは約8時間で期限切れになります。長時間運用する場合は API キー方式が安定します。
+> コンテナ内の onboarding スキップは `entrypoint.sh` が自動で行うため、追加設定は不要です。
 
 ### エージェント設定
 
