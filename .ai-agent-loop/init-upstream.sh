@@ -106,6 +106,13 @@ if [ ! -d "ideas" ]; then
     NEEDS_PUSH=1
 fi
 
+if [ ! -d "knowledge" ]; then
+    mkdir -p knowledge
+    touch knowledge/.keep
+    git add knowledge/.keep
+    NEEDS_PUSH=1
+fi
+
 if [ "${NEEDS_PUSH}" -eq 1 ]; then
     git commit -m "chore: add task directories for agent coordination"
     git push origin "${DEFAULT_BRANCH}"

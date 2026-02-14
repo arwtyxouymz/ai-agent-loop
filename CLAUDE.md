@@ -4,6 +4,7 @@
 
 - `current_tasks/` — Active task lock files. An agent claims a task by creating a file here and pushing it. Delete the file when the task is complete.
 - `ideas/` — Proposals and feature ideas. Any agent can create an idea file for others to pick up. Files prefixed with `IMPORTANT_` are high-priority human directives.
+- `knowledge/` — Shared knowledge base. Agents append learnings, gotchas, and patterns here. Read during orientation, write when you discover something useful. Never overwrite existing entries.
 
 ## Git Workflow
 
