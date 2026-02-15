@@ -16,3 +16,4 @@ Thumbs.db
 
 # Upstream bare repo volume data (managed by Docker)
 upstream-repo/
+.serena

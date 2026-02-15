@@ -5,9 +5,11 @@ services:
     volumes:
       - upstream-repo:/upstream
       - ./init-upstream.sh:/init-upstream.sh:ro
-      - ${HOST_PROJECT_DIR:-.}:/host-repo:ro
+      - ${HOST_PROJECT_DIR:-..}:/host-repo:ro
     environment:
       - DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}
+      - AGENT_UID=${AGENT_UID:-1001}
+      - AGENT_GID=${AGENT_GID:-1001}
     entrypoint: ["/bin/sh", "/init-upstream.sh"]
 
   # ---- Claude Code agent (scalable) ----

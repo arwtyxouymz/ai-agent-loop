@@ -9,6 +9,8 @@ set -euo pipefail
 UPSTREAM_DIR="${UPSTREAM_DIR:-/upstream}"
 HOST_REPO="${HOST_REPO:-/host-repo}"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+AGENT_UID="${AGENT_UID:-1001}"
+AGENT_GID="${AGENT_GID:-1001}"
 
 # ---------------------------------------------------------------------------
 # Validate host repo
@@ -66,6 +68,8 @@ if [ -f "${UPSTREAM_DIR}/HEAD" ] && git --git-dir="${UPSTREAM_DIR}" rev-parse HE
     fi
 
     git -C "${HOST_REPO}" push "${UPSTREAM_DIR}" "HEAD:refs/heads/${DEFAULT_BRANCH}" --force
+    # Transfer ownership to agent user so Git trusts the repo
+    chown -R "${AGENT_UID}:${AGENT_GID}" "${UPSTREAM_DIR}"
     echo "[init-upstream] Bare repo updated to host HEAD (${HOST_HEAD:0:8})."
     exit 0
 fi
@@ -77,6 +81,9 @@ echo "[init-upstream] Cloning host repo as bare into ${UPSTREAM_DIR}..."
 git clone --bare "${HOST_REPO}" "${UPSTREAM_DIR}"
 
 echo "[init-upstream] Bare repo created from host (HEAD=${HOST_HEAD:0:8})."
+
+# Transfer ownership to agent user so Git trusts the repo
+chown -R "${AGENT_UID}:${AGENT_GID}" "${UPSTREAM_DIR}"
 
 # ---------------------------------------------------------------------------
 # Ensure current_tasks/ and ideas/ directories exist
