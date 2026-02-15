@@ -33,6 +33,11 @@ services:
     stop_grace_period: 5m
     stop_signal: SIGTERM
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   upstream-repo:

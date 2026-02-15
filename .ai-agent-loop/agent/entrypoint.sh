@@ -12,15 +12,11 @@ AGENT_ID="${HOSTNAME}"
 AGENT_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 AGENT_SLEEP="${AGENT_SLEEP:-5}"
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-5}"
-MAX_LOGS="${MAX_LOGS:-50}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-/upstream}"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 REPO_DIR="/workspace/repo"
-LOG_DIR="/workspace/logs"
 
 export AGENT_ID AGENT_MODEL
-
-mkdir -p "${LOG_DIR}"
 
 # ---------------------------------------------------------------------------
 # Graceful shutdown support
@@ -49,6 +45,8 @@ echo "[${AGENT_ID}] Agent starting (model=${AGENT_MODEL})"
 # ---------------------------------------------------------------------------
 git config --global user.email "${AGENT_ID}@ai-agent-loop"
 git config --global user.name "Claude Agent (${AGENT_ID})"
+git config --global --add safe.directory "${UPSTREAM_DIR}"
+git config --global --add safe.directory "${REPO_DIR}"
 
 # ---------------------------------------------------------------------------
 # Initial clone
@@ -103,21 +101,6 @@ if ls current_tasks/*.txt 1>/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# rotate_logs — keep only the most recent MAX_LOGS log files
-# ---------------------------------------------------------------------------
-rotate_logs() {
-    local count
-    count=$(find "${LOG_DIR}" -name "*.log" -type f 2>/dev/null | wc -l)
-    if [ "$count" -gt "$MAX_LOGS" ]; then
-        find "${LOG_DIR}" -name "*.log" -type f -printf '%T+ %p\n' 2>/dev/null \
-            | sort \
-            | head -n $((count - MAX_LOGS)) \
-            | cut -d' ' -f2- \
-            | xargs rm -f
-    fi
-}
-
-# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 consecutive_failures=0
@@ -156,16 +139,15 @@ while true; do
     fi
 
     loop_start=$(date +%s)
-    log_file="${LOG_DIR}/$(date +%Y%m%d_%H%M%S).log"
 
-    echo "[${AGENT_ID}] === Loop iteration start ===" | tee -a "${log_file}"
+    echo "[${AGENT_ID}] === Loop iteration start ==="
 
     # Pull latest changes
-    echo "[${AGENT_ID}] Pulling latest..." | tee -a "${log_file}"
-    if ! git pull --rebase origin "${DEFAULT_BRANCH}" 2>&1 | tee -a "${log_file}"; then
-        echo "[${AGENT_ID}] Rebase pull failed, trying merge..." | tee -a "${log_file}"
+    echo "[${AGENT_ID}] Pulling latest..."
+    if ! git pull --rebase origin "${DEFAULT_BRANCH}" 2>&1; then
+        echo "[${AGENT_ID}] Rebase pull failed, trying merge..."
         git rebase --abort 2>/dev/null || true
-        git pull --no-rebase origin "${DEFAULT_BRANCH}" 2>&1 | tee -a "${log_file}" || true
+        git pull --no-rebase origin "${DEFAULT_BRANCH}" 2>&1 || true
     fi
 
     # Render the prompt template
@@ -177,44 +159,40 @@ while true; do
     fi
 
     # Run Claude
-    echo "[${AGENT_ID}] Running Claude..." | tee -a "${log_file}"
+    echo "[${AGENT_ID}] Running Claude..."
     if claude -p "${rendered_prompt}" \
         --dangerously-skip-permissions \
-        --model "${AGENT_MODEL}" \
-        2>&1 | tee -a "${log_file}"; then
+        --model "${AGENT_MODEL}"; then
 
         consecutive_failures=0
 
         # Push any changes Claude made
         if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
-            echo "[${AGENT_ID}] Changes detected, pushing..." | tee -a "${log_file}"
+            echo "[${AGENT_ID}] Changes detected, pushing..."
             git add -A
-            git commit -m "agent(${AGENT_ID}): automated changes" --allow-empty-message 2>&1 | tee -a "${log_file}" || true
-            push_with_retry 2>&1 | tee -a "${log_file}" || true
+            git commit -m "agent(${AGENT_ID}): automated changes" --allow-empty-message || true
+            push_with_retry || true
         else
-            echo "[${AGENT_ID}] No changes to push." | tee -a "${log_file}"
+            echo "[${AGENT_ID}] No changes to push."
         fi
     else
         consecutive_failures=$((consecutive_failures + 1))
-        echo "[${AGENT_ID}] Claude failed (consecutive: ${consecutive_failures})" | tee -a "${log_file}"
+        echo "[${AGENT_ID}] Claude failed (consecutive: ${consecutive_failures})"
 
         # Exponential backoff on consecutive failures
         if [ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]; then
             backoff=$((consecutive_failures * 60))
             [ $backoff -gt 300 ] && backoff=300
-            echo "[${AGENT_ID}] Backing off for ${backoff}s..." | tee -a "${log_file}"
+            echo "[${AGENT_ID}] Backing off for ${backoff}s..."
             sleep $backoff &
             wait $! 2>/dev/null || true
         fi
     fi
 
-    # Log rotation
-    rotate_logs
-
     # Sleep before next iteration
     loop_end=$(date +%s)
     elapsed=$((loop_end - loop_start))
-    echo "[${AGENT_ID}] Loop took ${elapsed}s, sleeping ${AGENT_SLEEP}s..." | tee -a "${log_file}"
+    echo "[${AGENT_ID}] Loop took ${elapsed}s, sleeping ${AGENT_SLEEP}s..."
     sleep "${AGENT_SLEEP}" &
     wait $! 2>/dev/null || true
 done
