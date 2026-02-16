@@ -30,10 +30,15 @@
 │  │            │            │            │             │      │
 │  │       ┌────┴───┐  ┌────┴───┐  ┌────┴───┐         │      │
 │  │       │Agent 1 │  │Agent 2 │  │Agent N │  ...     │      │
-│  │       │ clone  │  │ clone  │  │ clone  │ (最大 8) │      │
+│  │       │(agent) │  │(agent) │  │(agent) │ (最大 8) │      │
 │  │       │ loop   │  │ loop   │  │ loop   │          │      │
 │  │       │ push   │  │ push   │  │ push   │          │      │
 │  │       └────────┘  └────────┘  └────────┘          │      │
+│  │                                                   │      │
+│  │  ┌────────────────────────────────────────────┐   │      │
+│  │  │  viewer (claude-code-viewer)               │   │      │
+│  │  │  セッションログ可視化 (port 3400)            │   │      │
+│  │  └────────────────────────────────────────────┘   │      │
 │  └───────────────────────────────────────────────────┘      │
 │                                                             │
 │  .ai-agent-loop/sync-back.sh ← エージェントの成果を取り込み   │
@@ -80,7 +85,7 @@ docker compose -f .ai-agent-loop/docker-compose.yml up -d
 
 ```bash
 # 1. クローン
-git clone https://github.com/yourname/ai-agent-loop.git
+git clone https://github.com/arwtyxouymz/ai-agent-loop.git
 cd ai-agent-loop
 
 # 2. 環境変数を設定
@@ -123,7 +128,7 @@ my-project/                           # ユーザーの既存 Git リポジト�
 ├── ideas/                            # エージェントが必要に応じて作成
 ├── knowledge/                        # エージェントが学びを蓄積（共有ナレッジベース）
 └── .ai-agent-loop/                   # オーケストレーション（ドロップイン）
-    ├── docker-compose.yml            # サービス定義: upstream + agent
+    ├── docker-compose.yml            # サービス定義: upstream + agent + viewer
     ├── orchestrator.sh               # オートスケーリング（ホスト上で実行）
     ├── init-upstream.sh              # ホストリポからベアリポをクローン
     ├── sync-back.sh                  # エージェント成果をホストに取り込み
@@ -131,8 +136,9 @@ my-project/                           # ユーザーの既存 Git リポジト�
     ├── .env.example                  # 環境変数テンプレート
     ├── .gitignore                    # .env, orchestrator.log を除外
     ├── agent/
-    │   ├── Dockerfile                # node:20-slim + git + Claude Code CLI
+    │   ├── Dockerfile                # node:24-slim + git + Claude Code CLI（非rootユーザー）
     │   └── entrypoint.sh             # 無限ループ（心臓部）
+    ├── agent-sessions/               # Claude セッションデータ（永続化・viewer で閲覧）
     ├── docs/                         # 参考ドキュメント
     └── examples/                     # タスク/アイデアファイルの例
 ```
@@ -146,9 +152,10 @@ my-project/                           # ユーザーの既存 Git リポジト�
 ```
 ┌─────────────────────────────────────────┐
 │            エージェント起動              │
-│  1. 一意の Git ID を設定（ホスト名）     │
-│  2. ベアリポからクローン                 │
-│  3. 前回の残留ロックファイルをクリア      │
+│  1. 非rootユーザー(agent)で実行          │
+│  2. 一意の Git ID を設定（ホスト名）     │
+│  3. ベアリポからクローン                 │
+│  4. 前回の残留ロックファイルをクリア      │
 └──────────────┬──────────────────────────┘
                │
                ▼
@@ -161,13 +168,15 @@ my-project/                           # ユーザーの既存 Git リポジト�
 │  3. claude -p <プロンプト> を実行         │          │
 │     --dangerously-skip-permissions      │          │
 │  4. 変更があれば → push_with_retry      │          │
-│  5. ログローテーション（最新50件保持）    │          │
-│  6. 5秒スリープ（割り込み可能）          │          │
+│  5. 5秒スリープ（割り込み可能）          │          │
 │                                         │          │
 │  失敗時:                                 │          │
 │    指数バックオフ（最大300秒）            │          │
 └─────────────────────────────────────────┘──────────┘
 ```
+
+> **ログ管理:** エージェントのログは Docker の `json-file` ログドライバで管理される（コンテナあたり 10MB × 3ファイル）。
+> `docker compose logs -f agent` で確認可能。
 
 #### 起動時の stale lock クリア
 
@@ -405,11 +414,22 @@ git pull --no-rebase origin main
 ### `agent`（スケーラブルワーカー）
 
 各レプリカの動作：
+- **非rootユーザー**（`agent`, UID は `AGENT_UID` で設定可能）で実行
 - 共有ベアリポからクローン
 - 無限 Claude Code ループを実行
 - コンテナのホスト名に基づく一意の Git ID を取得
 - クラッシュ時は自動再起動（`restart: unless-stopped`）
 - メモリ制限: コンテナあたり 4GB
+- ログは Docker `json-file` ドライバで管理（10MB × 3ファイル）
+- セッションデータは `agent-sessions/` に永続化
+
+### `viewer`（セッションログビューア）
+
+[claude-code-viewer](https://www.npmjs.com/package/@kimuson/claude-code-viewer) を使って、エージェントの Claude Code セッションをブラウザで可視化するサービス。
+
+- デフォルトポート: `3400`（`VIEWER_PORT` で変更可能）
+- `agent-sessions/` を読み取り専用でマウント
+- `http://localhost:3400` でアクセス
 
 ## 設定リファレンス
 
@@ -447,7 +467,8 @@ echo 'CLAUDE_CODE_OAUTH_TOKEN=<取得したトークン>' >> .ai-agent-loop/.env
 | `CLAUDE_MODEL` | `claude-opus-4-6` | 使用する Claude モデル |
 | `AGENT_SLEEP` | `5` | ループ間のスリープ秒数 |
 | `MAX_CONSECUTIVE_FAILURES` | `5` | 延長バックオフまでの連続失敗回数 |
-| `MAX_LOGS` | `50` | エージェントあたりの最大ログファイル数 |
+| `AGENT_UID` | `1001` | エージェントコンテナ内の非rootユーザーの UID |
+| `AGENT_GID` | `1001` | エージェントコンテナ内の非rootユーザーの GID |
 
 ### オーケストレータ設定
 
@@ -460,6 +481,12 @@ echo 'CLAUDE_CODE_OAUTH_TOKEN=<取得したトークン>' >> .ai-agent-loop/.env
 | `MIN_IDEAS_PER_AGENT` | `2` | タスク対エージェント比率 |
 | `CONFLICT_THRESHOLD_HIGH` | `40` | スケーリングを一時停止するコンフリクト率（%） |
 | `CONFLICT_THRESHOLD_LOW` | `20` | 健全とみなすコンフリクト率（%） |
+
+### セッションビューア設定
+
+| 変数 | デフォルト | 説明 |
+|------|-----------|------|
+| `VIEWER_PORT` | `3400` | claude-code-viewer の公開ポート |
 
 ### プロジェクト固有設定
 
@@ -520,13 +547,15 @@ BUILD_CHECK_CMD="go build ./..."
 プロジェクト固有のツールチェーンが必要な場合、`.ai-agent-loop/agent/Dockerfile` を拡張する：
 
 ```dockerfile
-FROM node:20-slim
+FROM node:24-slim
 
 # ... 既存のセットアップ ...
 
-# 例: Rust ツールチェーンを追加
+# 例: Rust ツールチェーンを追加（非rootユーザーのためHOME変更に注意）
+USER root
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
+USER agent
 ```
 
 ## 運用ガイド
@@ -549,6 +578,9 @@ docker compose -f .ai-agent-loop/docker-compose.yml ps
 
 # 全エージェントのログをフォロー
 docker compose -f .ai-agent-loop/docker-compose.yml logs -f agent
+
+# セッションビューアでブラウザから確認
+#   http://localhost:3400 にアクセス（ポートは VIEWER_PORT で変更可能）
 
 # オーケストレータの判断ログを確認
 tail -f .ai-agent-loop/orchestrator.log
@@ -654,7 +686,7 @@ docker compose -f .ai-agent-loop/docker-compose.yml down -v
 
 | 判断 | 選択 | 根拠 |
 |------|------|------|
-| ベースイメージ | `node:20-slim` | Claude Code CLI は npm パッケージ。slim で約400MB削減 |
+| ベースイメージ | `node:24-slim` | Claude Code CLI は npm パッケージ。slim で約400MB削減 |
 | ベアリポ同期 | `git pull --rebase` + `--no-rebase` フォールバック | rebase で履歴がクリーン、複雑なコンフリクト時のフォールバック確保 |
 | スケール増分 | 1サイクルあたり最大+2 | 段階的スケーリングがコンフリクト率の急増を防ぐ（C コンパイラプロジェクトからの知見） |
 | テンプレート展開 | `envsubst` + 明示的変数リスト | プロンプト内の `$()` の誤展開を防止 |
@@ -662,6 +694,9 @@ docker compose -f .ai-agent-loop/docker-compose.yml down -v
 | 中央スケジューラなし | Git ベースの楽観的ロックのみ | C コンパイラプロジェクトで実証済みのアプローチ。インフラオーバーヘッドゼロ |
 | `stop_grace_period` | 5 分 | claude セッションは通常数分。超過時は Docker が SIGKILL（許容範囲のトレードオフ） |
 | `sleep & wait` パターン | `sleep N & wait $!` | SIGTERM 受信時に sleep を即座に中断し、次ループ先頭の終了チェックに到達させる |
+| 非rootユーザー | `agent` (UID=1001) | Claude Code が root 実行を拒否するため。`AGENT_UID` でホストとの UID マッピングも可能 |
+| ログ管理 | Docker `json-file` ドライバ | ファイルベースのログローテーションより運用がシンプル。`docker compose logs` で一元確認 |
+| セッションビューア | `claude-code-viewer` | エージェントの作業内容をブラウザでリアルタイム確認。デバッグと監視を容易にする |
 | ロック削除範囲 | 自 AGENT_ID のみ | 他エージェントの有効なロックを誤削除しない。並列稼働時の安全性を優先 |
 
 ## 参考資料
