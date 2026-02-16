@@ -170,8 +170,8 @@ while true; do
         if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
             echo "[${AGENT_ID}] Changes detected, pushing..."
             git add -A
-            git commit -m "agent(${AGENT_ID}): automated changes" --allow-empty-message || true
-            push_with_retry || true
+            git commit -m "agent(${AGENT_ID}): automated changes" --allow-empty-message 2>&1 || true
+            push_with_retry 2>&1 || true
         else
             echo "[${AGENT_ID}] No changes to push."
         fi
