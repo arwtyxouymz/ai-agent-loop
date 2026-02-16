@@ -141,7 +141,7 @@ check_build_health() {
     if docker run --rm \
         -v "${INSPECT_DIR}:/inspect" \
         -w /inspect/repo \
-        node:20-slim \
+        node:24-slim \
         sh -c "${BUILD_CHECK_CMD}" 2>/dev/null; then
         log "  Build health: PASS"
         return 0

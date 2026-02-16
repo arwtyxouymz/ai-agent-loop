@@ -5,12 +5,39 @@ Multiple agents work on the same codebase concurrently via a shared Git reposito
 
 ## Orientation (do this first every session)
 
-1. Read `CLAUDE.md` for project context, tech stack, and coding standards.
-2. Read files in `knowledge/` to learn from previous agent sessions.
-3. Run `git log --oneline -20` to understand recent activity.
-4. Check `current_tasks/` for active task locks (claimed by other agents).
-5. Check `ideas/` for proposed work items.
-6. Decide what to work on based on the priority list below.
+1. **Ensure directories exist**: If `current_tasks/`, `ideas/`, or `knowledge/` do not exist, create them with a `.gitkeep` file and commit.
+2. Read `CLAUDE.md` for project context, tech stack, and coding standards.
+3. Read files in `knowledge/` to learn from previous agent sessions.
+4. Run `git log --oneline -20` to understand recent activity.
+5. Check `current_tasks/` for active task locks (claimed by other agents).
+6. Check `ideas/` for proposed work items.
+7. Decide what to work on based on the priority list below.
+
+## Mandatory Session Protocol (MUST follow — no exceptions)
+
+Every session MUST follow this 3-phase protocol. Skipping any phase is a **protocol violation**.
+
+### Phase 1: Claim (before writing any code)
+
+1. Decide what you will work on this session (one focused task).
+2. Create a lock file in `current_tasks/` following the Task Claiming format below.
+3. Commit and push the lock file **before** starting implementation.
+
+If there are no ideas in `ideas/` and no build failures, choose from Task Priority #4-5 and still create a lock file describing your planned work.
+
+### Phase 2: Execute
+
+1. Implement the task. Commit frequently with conventional messages.
+2. Push after each logical commit.
+
+### Phase 3: Wrap-up (before session ends)
+
+You MUST complete ALL of the following before the session ends:
+
+1. **Delete your lock file**: `git rm current_tasks/<task-name>.txt` and commit with your final implementation changes.
+2. **Write ideas** (MANDATORY — at least 1): Create at least one file in `ideas/` describing work that should be done next. This includes improvements you noticed, bugs you found, features that would help, or next steps from your current work. If you completed everything perfectly and see no improvements, write an idea about testing or documentation gaps.
+3. **Write knowledge** (if applicable): If you learned anything non-obvious during this session (gotchas, patterns, what worked/failed), append it to the appropriate `knowledge/` file.
+4. **Push all changes**: Ensure everything is committed and pushed.
 
 ## Task Priority
 
@@ -128,3 +155,4 @@ When you encounter merge conflicts:
 - **Keep sessions focused.** Do one task per session, do it well.
 - **Leave the codebase better than you found it.**
 - **Never modify `.ai-agent-loop/`** — This directory contains orchestration infrastructure. Do not edit or delete files in it.
+- **ALWAYS follow the Mandatory Session Protocol.** Every session must produce: (1) a task lock at the start, (2) at least one idea file at the end, (3) knowledge entries when applicable. Coding without following this protocol is a violation, no matter how productive the code output is.

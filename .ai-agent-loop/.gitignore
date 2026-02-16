@@ -1,3 +1,4 @@
 .env
 orchestrator.log
 docker-compose.override.yml
+agent-sessions/

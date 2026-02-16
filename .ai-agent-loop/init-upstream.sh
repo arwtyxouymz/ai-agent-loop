@@ -12,6 +12,10 @@ DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 AGENT_UID="${AGENT_UID:-1001}"
 AGENT_GID="${AGENT_GID:-1001}"
 
+# Trust directories that will be chowned to agent user
+git config --global --add safe.directory "${UPSTREAM_DIR}"
+git config --global --add safe.directory "${HOST_REPO}"
+
 # ---------------------------------------------------------------------------
 # Validate host repo
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ services:
     volumes:
       - upstream-repo:/upstream
       - ./AGENT_PROMPT.md:/config/AGENT_PROMPT.md:ro
+      - ./agent-sessions/projects:/home/agent/.claude/projects
     depends_on:
       upstream:
         condition: service_completed_successfully
@@ -38,6 +39,20 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ---- Session log viewer ----
+  viewer:
+    image: node:24-slim
+    command: >-
+      npx @kimuson/claude-code-viewer@latest
+      --hostname 0.0.0.0
+      --port 3400
+      --claude-dir /claude-data
+    ports:
+      - "${VIEWER_PORT:-3400}:3400"
+    volumes:
+      - ./agent-sessions:/claude-data:ro
+    restart: unless-stopped
 
 volumes:
   upstream-repo:

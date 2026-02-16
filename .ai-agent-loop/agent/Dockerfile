@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:24-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,9 +15,11 @@ RUN npm install -g @anthropic-ai/claude-code
 ARG AGENT_UID=1001
 RUN useradd -u ${AGENT_UID} -m -s /bin/bash agent
 
-# Create working directories with agent ownership
-RUN mkdir -p /workspace /config \
-    && chown -R agent:agent /workspace /config
+# Create working directories with correct ownership
+RUN mkdir -p /workspace /config && chown -R agent:agent /workspace /config
+
+# Pre-create .claude directory so bind mount doesn't leave parent as root-owned
+RUN mkdir -p /home/agent/.claude/projects && chown -R agent:agent /home/agent/.claude
 
 # Copy entrypoint
 COPY entrypoint.sh /entrypoint.sh
