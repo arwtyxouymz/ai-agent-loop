@@ -16,6 +16,8 @@ services:
   agent:
     build:
       context: ./agent
+      args:
+        AGENT_UID: ${AGENT_UID:-1001}
     env_file: .env
     environment:
       - DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}
